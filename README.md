@@ -62,8 +62,8 @@ If your mass-shells are in another format (e.g. HEALPix maps stored into numpy a
 
 # Examples
 
-- [Notebook: performing a weak lensing simulation and computing the convergence power spectrum](link).
-- [Script: performing a weak lensing simulation](link).
+- [Notebook: performing a weak lensing simulation and computing the convergence power spectrum](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/tutorial.ipynb).
+- [Script: performing a weak lensing simulation](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/raytracing_example_script.py).
 
 # Authors
 
@@ -71,7 +71,7 @@ This package has been developed by [Fulvio Ferlito](https://gitlab.mpcdf.mpg.de/
 
 # Contact
 
-If you have any question, suggestion, or need help with the code, don't hesitate to contact the [author](link).
+If you have any question, suggestion, or need help with the code, don't hesitate to contact the [author](fulvioferlito@gmail.com).
 
 # Citation
 
