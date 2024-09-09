@@ -71,7 +71,7 @@ This package has been developed by [Fulvio Ferlito](https://gitlab.mpcdf.mpg.de/
 
 # Contact
 
-If you have any question, suggestion, or need help with the code, don't hesitate to contact the [author](fulvioferlito@gmail.com).
+If you have any question, suggestion, or need help with the code, don't hesitate to contact the [author](mailto:fulvioferlito@gmail.com).
 
 # Citation
 
