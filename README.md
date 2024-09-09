@@ -36,7 +36,7 @@ You will need the following dependencies:
 
 # Usage
 
-Using the code to perform a weak lensing simulation is as simple as calling the ```raytrace``` function. For instructions see the [example notebook](link) and the [example notebook](link).
+Using the code to perform a weak lensing simulation is as simple as calling the ```raytrace``` function. For instructions see the [example notebook](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/tutorial.ipynb) and the [template script](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/raytracing_example_script.py).
 
 The code needs you to point to the ```simDir``` folder, where all the mass shells are arranged in the Gadget-4 format (based on hdf5) and directory structure, e.g.:
 
