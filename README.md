@@ -17,7 +17,7 @@ Deflection Of Rays In Astrophysical Numerical simulations
 
 Dorian is a Python package to compute full-sky ray-traced weak gravitational lensing maps starting from cosmological simulations.
 
-For technical details, see the [related paper](link).
+For technical details, see the [related paper](https://arxiv.org/abs/2406.08540).
 
 # Installation
 
@@ -67,7 +67,7 @@ If your mass-shells are in another format (e.g. HEALPix maps stored into numpy a
 
 # Authors
 
-This package has been developed by [Fulvio Ferlito](https://www.javiercarron.com), with contributions from: Christopher Davies, Alessandro Greco, Martin Reinecke and Volker Springel.
+This package has been developed by [Fulvio Ferlito](https://gitlab.mpcdf.mpg.de/fferlito), with contributions from: Christopher Davies, Alessandro Greco, Martin Reinecke and Volker Springel.
 
 # Contact
 
@@ -75,6 +75,6 @@ If you have any question, suggestion, or need help with the code, don't hesitate
 
 # Citation
 
-If you use this code for you work, please cite the [related paper](link).
+If you use this code for you work, please cite the [related paper](https://arxiv.org/abs/2406.08540).
 
 
