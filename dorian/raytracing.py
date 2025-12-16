@@ -1,160 +1,188 @@
 from .constants import M_sun_cgs, Mpc2cm, c_cgs, G_cgs
 from .cosmology import d_c
-from .gadget import load_all_headers, load_massmap, load_params
 from .parallel_transport import get_rotation_angle_array, rotate_tensor_array
 from .misc import print_logo
 import numpy as np
 import healpy as hp
 from ducc0.sht import synthesis_general
-from pathlib import Path
-import time, h5py
+import time
 
 
 def raytrace(
-    simDir: str,
-    z_s: float,
-    interp: str = "ngp",
-    outDir: str = "./",
-    restart_file: str = "",
-    lmax: int = 0,
-    max_time_in_sec: int = 0,
-    parallel_transport: bool = True,
-    save_ray_positions: bool = False,
-    nthreads: int = 1,
+    shells,
+    z_s,
+    omega_m,
+    omega_l,
+    nside,
+    shell_redshifts,
+    shell_distances,
+    interp="bilinear",
+    lmax=0,
+    parallel_transport=True,
+    nthreads=1,
 ):
-    """Routine for performing a ray tracing simulation.
+    """
+    Perform full-sky gravitational lensing ray-tracing through multiple lens planes.
+
+    This is the core ray-tracing algorithm in Dorian. It propagates light rays
+    backwards from the observer through a series of mass shells, computing
+    deflections and the Jacobian distortion matrix at each step.
 
     Parameters
     ----------
-    simDir : str
-        Path to the simulation folder.
+    shells : list of np.ndarray
+        List of HEALPix mass maps for each shell. Each map must contain mass
+        per pixel in units of 10^10 M_sun/h. Use ``prepare_density_shells()``
+        to convert from other formats. Maps should be in RING ordering.
     z_s : float
-        Source redshift.
-    interp : str
-        Interpolation scheme to use: "ngp", "bilinear" and "nufft".
-    outDir : str
-        Path of the folder in which to save the maps.
-    restart_file : str
-        Path of the folder where the restart file is located. If provided, the
-        simulation will restart from there. By default is a empty string,
-        which means that the simulation starts from the innermost shell.
-    lmax : float
-        Maximum angular number for SHT computations (default 3 * Nside).
-    max_time_in_sec : float
-        Maximum time in seconds available for the simulation. If provided, the
-        routine will take cake of writing restart files in the case the time is not
-        sufficient for finishing the simulation.
-    parallel_transport : bool
-        Wheter to apply the parallel transport of the distorion matrix to the
-        updated angular position of the ray at each plane. Setting this parameter
-        true is recomended.
-    save_ray_positions : bool
-        Wheter to also save the angular position of the rays at each lens plane (the
-        output becomes memory expensive).
-    nthreads : int
-        Number of OMP threads to use. At the moment this is only needed in the case
-        of nufft interpolation.
+        Source redshift. Only shells with ``z < z_s`` will contribute.
+    omega_m : float
+        Matter density parameter (Omega_m).
+    omega_l : float
+        Dark energy density parameter (Omega_Lambda).
+    nside : int
+        HEALPix NSIDE parameter defining the angular resolution.
+        Number of pixels = ``12 * nside**2``.
+    shell_redshifts : list of float
+        Redshift of each shell, same length as ``shells``.
+    shell_distances : list of float
+        Comoving distance to each shell in Mpc (not Mpc/h).
+    interp : {'bilinear', 'ngp', 'nufft'}, optional
+        Interpolation method for sampling fields at ray positions:
+
+        - ``'bilinear'``: Bilinear interpolation (default, recommended)
+        - ``'ngp'``: Nearest grid point (fastest, lowest accuracy)
+        - ``'nufft'``: Non-uniform FFT via ducc0 (highest accuracy)
+
+    lmax : int, optional
+        Maximum multipole ell for spherical harmonic transforms.
+        Default: ``3 * nside`` when set to 0.
+    parallel_transport : bool, optional
+        Whether to parallel transport the distortion matrix along geodesics
+        when rays are deflected. Recommended True for accurate results.
+        Default: True.
+    nthreads : int, optional
+        Number of OpenMP threads for ``'nufft'`` interpolation. Default: 1.
+
+    Returns
+    -------
+    kappa_born : np.ndarray
+        Born approximation convergence map. Shape: ``(npix,)``.
+    A_final : np.ndarray
+        Final Jacobian distortion matrix. Shape: ``(2, 2, npix)``.
+        Components: A[0,0]=A_11, A[0,1]=A_12, A[1,0]=A_21, A[1,1]=A_22.
+    beta_final : np.ndarray
+        Final angular positions (theta, phi) of rays. Shape: ``(2, npix)``.
+        theta in [0, pi], phi in [0, 2*pi].
+    theta : np.ndarray
+        Initial ray positions (HEALPix pixel centers). Shape: ``(2, npix)``.
+
+    Notes
+    -----
+    The algorithm iterates through shells from observer outward:
+
+    1. Compute surface density Sigma and convergence kappa for each shell
+    2. Transform kappa to spherical harmonics to get deflection angles alpha
+    3. Interpolate alpha at current ray positions (post-Born correction)
+    4. Update ray positions using the multi-plane lens equation
+    5. Update distortion matrix A with the tidal tensor U
+    6. Optionally parallel transport A to the new ray direction
+    7. Accumulate Born approximation convergence
+
+    The distortion matrix A relates source to image coordinates:
+    ``d(beta)/d(theta) = A``, initialized to identity.
+
+    Lensing observables from A:
+        - Convergence: ``kappa = 1 - 0.5 * (A[0,0] + A[1,1])``
+        - Shear: ``gamma1 = 0.5 * (A[0,0] - A[1,1])``, ``gamma2 = A[0,1]``
+
+    Examples
+    --------
+    Low-level usage (prefer ``raytrace_from_density`` for convenience):
+
+    >>> from dorian.raytracing import raytrace
+    >>> from dorian.lensing import prepare_density_shells
+    >>> # Prepare shells first
+    >>> shells, distances, redshifts = prepare_density_shells(...)
+    >>> # Run ray-tracing
+    >>> kappa_born, A, beta, theta = raytrace(
+    ...     shells=shells,
+    ...     z_s=1.0,
+    ...     omega_m=0.3,
+    ...     omega_l=0.7,
+    ...     nside=512,
+    ...     shell_redshifts=redshifts,
+    ...     shell_distances=distances,
+    ... )
+    >>> # Compute ray-traced convergence
+    >>> kappa_rt = 1.0 - 0.5 * (A[0, 0] + A[1, 1])
+
+    See Also
+    --------
+    dorian.lensing.raytrace_from_density : High-level interface (recommended).
+    dorian.lensing.prepare_density_shells : Convert density maps to mass format.
     """
     t_begin = time.time()
 
     print_logo()
-    print_initial_info(simDir, z_s, interp, outDir)
-    print("Initializing data", flush=True)
 
-    # Create output directory if it does not exist
-    Path(f"{outDir}").mkdir(exist_ok=True)
-
-    # Define factor to give physical units to the convergence
     kappa_fac = (1e10 * M_sun_cgs) * (1 / Mpc2cm) * 4 * np.pi * G_cgs / (c_cgs**2)
 
-    # Load info about the relevant shells
-    headers = load_all_headers(simDir)[::-1]
-    sh_info = list(filter(lambda a: a["Redshift"] < z_s, headers))
-    sh_ids = [a["Nmap"] for a in sh_info]  # shell ids
-    print(f"The following shells will be used:\n{sh_ids}")
-    npix = sh_info[0]["NpixTotal"]
-    nside = hp.npix2nside(npix)
-    # Compute the comoving distance of the k-th shell
-    for k in range(len(sh_info)):
-        sh_info[k]["ComDistMid"] = np.mean([sh_info[k]["ComDistStart"], sh_info[k]["ComDistEnd"]])
+    contributing_shells = []
+    for i, (shell, z_k, d_k) in enumerate(zip(shells, shell_redshifts, shell_distances)):
+        if z_k < z_s:
+            contributing_shells.append({
+                'shell_data': shell,
+                'redshift': z_k,
+                'distance': d_k,
+                'index': i
+            })
 
-    # Compute comoving distance of the source
-    params = load_params(simDir)
-    Omega_M, Omega_L = params["Omega0"], params["OmegaLambda"]
-    d_s = d_c(z=z_s, Omega_M=Omega_M, Omega_L=Omega_L)
+    print(f"Using {len(contributing_shells)} shells out of {len(shells)} total")
 
-    # Angular position of the rays when they reach the observer
-    # We shoot one ray for every pixel center
+    if len(contributing_shells) == 0:
+        raise ValueError(f"No shells found with z < z_s ({z_s}). Check your shell redshifts.")
+
+    print(f"Shell redshift range: {contributing_shells[0]['redshift']:.3f} to {contributing_shells[-1]['redshift']:.3f}")
+
+    npix = hp.nside2npix(nside)
+
+    d_s = d_c(z=z_s, Omega_M=omega_m, Omega_L=omega_l)
+
     theta = np.array(hp.pix2ang(nside, np.arange(npix)))
-    nrays = theta.shape[1]  # total number of rays
-    # Angular position of the rays, dimensions are:
-    # [k-th plane (previous, current), rows of beta (theta, phi), ray index]
+    nrays = theta.shape[1]
     beta = np.zeros([2, 2, nrays])
-    # Distorsion matrix, dimensions are:
-    # [k-th plane (previous, current), rows of A, columns of A, ray index]
     A = np.zeros([2, 2, 2, nrays])
-    # Convergence field in the Born approximation
     kappa_born = np.zeros([nrays])
 
-    if not (restart_file):
-        # Initialize quantities for the first lens plane
-        beta[0] = theta
-        beta[1] = theta
-        for i in range(2):
-            for j in range(2):
-                A[0][i][j] = 1 if i == j else 0
-                A[1][i][j] = 1 if i == j else 0
-        sh_start = 0
-    else:
-        # Initialize quantities from the restart file
-        with h5py.File(restart_file, "r") as f_restart:
-            # TO DO check header
-            sh_start = f_restart["Header"].attrs["sh_start"]
-            beta[0] = np.array(f_restart["Ray_position"]["beta_0"])
-            beta[1] = np.array(f_restart["Ray_position"]["beta_1"])
-            A[0] = np.array(f_restart["Distortion_matrix"]["A_0"])
-            A[1] = np.array(f_restart["Distortion_matrix"]["A_1"])
-            kappa_born = np.array(f_restart["Distortion_matrix"]["kappa_born"])
-        print(f"Loaded restart file from: {restart_file}")
-        print(f"Iteration will restart from shell n. {sh_start}")
+    beta[0] = theta
+    beta[1] = theta
+    for i in range(2):
+        for j in range(2):
+            A[0][i][j] = 1 if i == j else 0
+            A[1][i][j] = 1 if i == j else 0
+    sh_start = 0
 
-    # Define some constants to be used later in the SHT
-    if lmax==0: 
+    if lmax==0:
         lmax = 3 * nside
     ell = np.arange(0, lmax + 1)
 
-    # Iterate over the lens planes
-    for k in range(sh_start, len(sh_ids)):
+    for k in range(sh_start, len(contributing_shells)):
         t0 = time.time()
-        print(f"*"*73, flush=True)
-        print(f"Working on lens plane {k+1} of {len(sh_ids)}, MassMap n. {sh_ids[k]}")
-        print("Computing convergence...", flush=True)
-        # Define redshift and comoving distances of the k-th plane
-        z_k = sh_info[k]["Redshift"]
-        d_k = sh_info[k]["ComDistMid"]
+        shell_info = contributing_shells[k]
+        z_k = shell_info['redshift']
+        d_k = shell_info['distance']
+        shell_data = shell_info['shell_data']
 
-        # Load the mass and compute Sigma ((1e10 M_sun/h)/sr)
-        Sigma = load_massmap(simDir, sh_ids[k]) / (4 * np.pi / npix)
-        # physical smoothing of 100 kpc
-        # Sigma = hp.smoothing(Sigma, sigma=np.radians(1 / 60))
+        Sigma = shell_data / (4 * np.pi / npix)
         Sigma_mean = np.mean(Sigma)
 
-        # Compute convergence at the single lens plane
         kappa = kappa_fac * (1 + z_k) * (1 / d_k) * (Sigma - Sigma_mean)
-        print(f"took {round(time.time()-t0,1)} s")
 
-        # Compute quantities in spherical harmonics domain
-        t0 = time.time()
-        print("Computing quantities in spherical harmonics domain...", flush=True)
         kappa_lm = hp.map2alm(kappa, pol=False, lmax=lmax)
         alpha_lm = hp.almxfl(kappa_lm, -2 / (np.sqrt((ell * (ell + 1)))))
         f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) / (ell * (ell + 1.0)))
         g_lm_E = hp.almxfl(kappa_lm, f_l)
-        print(f"took {round(time.time()-t0,1)} s")
-
-        # Evaluate alpha and U at desired angular positions: alpha(beta_k)
-        t0 = time.time()
-        print("Evaluating alpha and U at ray positions...", flush=True)
 
         if interp in ["ngp", "bilinear"]:
             alpha = hp.alm2map_spin(
@@ -192,36 +220,18 @@ def raytrace(
             U[0][1] = U[1][0]
             U[1][1] = kappa_nufft - g1
 
-        print(f"took {round(time.time()-t0,1)} s")
-
-        # Propagate every ray
-        t0 = time.time()
-        print("Propagating ray angular positions...", flush=True)
-        
-        # Compute distance of previous and next shell
-        d_km1 = 0 if k==0 else sh_info[k-1]["ComDistMid"]
-        d_kp1 = d_s if k == len(sh_ids) - 1 else sh_info[k+1]["ComDistMid"]
-        # Compute distance-weighing pre-factors
+        d_km1 = 0 if k==0 else contributing_shells[k-1]['distance']
+        d_kp1 = d_s if k == len(contributing_shells) - 1 else contributing_shells[k+1]['distance']
         fac1 = d_k/d_kp1 * (d_kp1-d_km1)/(d_k-d_km1)
         fac2 = (d_kp1-d_k)/d_kp1
 
         for i in range(2):
             beta[0][i] = (1 - fac1) * beta[0][i] + fac1 * beta[1][i] - fac2 * alpha[i]
 
-        # Update angular positions
         beta[[0, 1], ...] = beta[[1, 0], ...]
 
-        # Make sure that all theta of beta[1] are in range [0, pi]
-        # (only the poles need to be checked)
         check_theta_poles(beta[1])
-        # Make sure that all phi of beta[1] are in range [0, 2*pi]
         beta[1][1] %= 2 * np.pi
-
-        print(f"took {round(time.time()-t0,1)} s")
-
-        # Propagate Distortion matrix for exery ray
-        t0 = time.time()
-        print("Propagating distortion matrix...", flush=True)
 
         for i in range(2):
             for j in range(2):
@@ -231,15 +241,9 @@ def raytrace(
                     - fac2 * (U[i][0] * A[1][0][j] + U[i][1] * A[1][1][j])
                 )
 
-        # Update distortion matrix
         A[[0, 1], ...] = A[[1, 0], ...]
 
-        print(f"took {round(time.time()-t0,1)} s")
-
-        # Parallel transport distortion matrix
         if parallel_transport:
-            t0 = time.time()
-            print("Parallel transporting distortion matrix...", flush=True)
 
             cospsi, sinpsi = get_rotation_angle_array(
                 beta[0][0][:], beta[0][1][:], beta[1][0][:], beta[1][1][:]
@@ -247,94 +251,37 @@ def raytrace(
             A[0, :, :, :] = rotate_tensor_array(A[0, :, :, :], cospsi, sinpsi)
             A[1, :, :, :] = rotate_tensor_array(A[1, :, :, :], cospsi, sinpsi)
 
-            print(f"took {round(time.time()-t0,1)} s")
-
-        # Compute Born approximation convergence
         kappa_born += ((d_s - d_k) / d_s) * kappa
-
-        # Eventually save ray positions
-        if save_ray_positions:
-            t0 = time.time()
-            # Save ray posistions
-            save_ray_positions_aux(
-                simDir, outDir, k, params, beta[1], nside, interp, z_s
-            )
-            print(f"took {round(time.time()-t0,1)} s")
-
-        # If there is not enough time for other 1.5 iterations, write restart file
-        elapsed_sec = time.time() - t_begin
-        estim_sec_per_iter = elapsed_sec / (k - sh_start + 1)
-        print(f"Estimated seconds per iteration: {estim_sec_per_iter}")
-        if max_time_in_sec and elapsed_sec + 1.5 * estim_sec_per_iter > max_time_in_sec:
-            # Write restart file
-            print("You are running out of time, wrtitng the restart file")
-            fname_out = f"{outDir}restart_raytracing_shell{k}_z{z_s:.1f}_{interp}.hdf5"
-            with h5py.File(fname_out, "a") as fout:
-                write_header(fout, simDir, params["BoxSize"], z_s, nside)
-                fout["Header"].attrs.create("sh_start", k + 1)
-                grp_A = fout.create_group("Distortion_matrix")
-                grp_A.create_dataset("A_0", data=A[0])
-                grp_A.create_dataset("A_1", data=A[1])
-                grp_A.create_dataset("kappa_born", data=kappa_born)
-                grp_beta = fout.create_group("Ray_position")
-                grp_beta.create_dataset("beta_0", data=beta[0])
-                grp_beta.create_dataset("beta_1", data=beta[1])
-            print(f"Wrote restart file to: {fname_out}")
-            return
-
-    # Save data
-    print(f"*"*73, flush=True)
-    fname_out = f"{outDir}raytracing_z{z_s:.1f}_{interp}.hdf5"
-    with h5py.File(fname_out, "w") as fout:
-        write_header(fout, simDir, params["BoxSize"], z_s, nside)
-        grp_A = fout.create_group("Distortion_matrix")
-        grp_A.create_dataset("Raytraced", data=A[1])
-        grp_A.create_dataset("Kappa_born", data=kappa_born)
-        grp_beta = fout.create_group("Ray_position")
-        grp_beta.create_dataset("Beta", data=beta[1])
-        grp_beta.create_dataset("Theta", data=theta)
-    print(f"Saved data to: {fname_out}")
 
     print(f"*"*73, flush=True)
     print(f"Total time: {round(time.time()-t_begin)} s")
     print("Ray tracing finished, bye.")
     print(f"*"*73, flush=True)
-    return
-
-
-############################# AUXYLIARY FUNCTIONS #############################
-
-
-def print_initial_info(simDir, z_s, interp, outDir):
-    """Auxiliary function to write initial information about the run."""
-    print(f"*"*73, flush=True)
-    print(f"Input Directory:      {simDir}", flush=True)
-    print(f"Source redshift:      {z_s}", flush=True)
-    print(f"Interpolation method: {interp}", flush=True)
-    print(f"Output directory:     {outDir}", flush=True)
-    print(f"*"*73, flush=True)
-
-
-def write_header(fout, simDir, boxSize, z_s, nside):
-    """Auxiliary function to write the header."""
-    grp_header = fout.create_group("Header")
-    grp_header.attrs.create("SimDir", simDir)
-    grp_header.attrs.create("BoxSize", boxSize)
-    grp_header.attrs.create("Source_redshift", z_s)
-    grp_header.attrs.create("Nside", nside)
-    return
+    return kappa_born, A[1], beta[1], theta
 
 
 def get_val(m_list, theta, phi, interp):
-    """Auxiliary function for interpolation.
-    m_list : list of 1-D arrays
-        list of healpix maps to interpolate over.
-    theta : 1-D array
-        co latitudes of points where to interpolate.
-    phi : 1-D array
-        longitudes of points where to interpolate.
-    interp : string
-        interpolation method.
+    """
+    Interpolate HEALPix maps at arbitrary angular positions.
+
+    Parameters
+    ----------
+    m_list : list of np.ndarray
+        List of HEALPix maps to interpolate. All maps must have the same NSIDE.
+    theta : np.ndarray
+        Co-latitude coordinates in radians, range [0, pi]. Shape: ``(npoints,)``.
+    phi : np.ndarray
+        Longitude coordinates in radians, range [0, 2*pi]. Shape: ``(npoints,)``.
+    interp : {'ngp', 'bilinear'}
+        Interpolation method:
+
+        - ``'ngp'``: Nearest grid point (fastest)
+        - ``'bilinear'``: Bilinear interpolation using 4 nearest pixels
+
+    Returns
+    -------
+    list of np.ndarray
+        Interpolated values for each input map. Each array has shape ``(npoints,)``.
     """
     nside = hp.npix2nside(len(m_list[0]))
     if interp == "ngp":
@@ -346,19 +293,33 @@ def get_val(m_list, theta, phi, interp):
 
 
 def get_val_nufft(alm, theta, phi, spin, lmax, nthreads):
-    """Auxiliary function for interpolation.
-    alm : np array
-        alm coefficients.
-    theta : 1-D array
-        co latitudes of points where to interpolate.
-    phi : 1-D array
-        longitudes of points where to interpolate.
+    """
+    Evaluate spherical harmonic expansion at arbitrary positions using NUFFT.
+
+    Uses ducc0's ``synthesis_general`` for high-accuracy non-uniform evaluation
+    of spin-weighted spherical harmonic transforms.
+
+    Parameters
+    ----------
+    alm : np.ndarray
+        Spherical harmonic coefficients in healpy's indexing convention.
+    theta : np.ndarray
+        Co-latitude coordinates in radians, range [0, pi]. Shape: ``(npoints,)``.
+    phi : np.ndarray
+        Longitude coordinates in radians, range [0, 2*pi]. Shape: ``(npoints,)``.
     spin : int
-        spin of the field.
+        Spin weight of the field (0 for scalars, 1 for vectors, 2 for tensors).
     lmax : int
-        maximum multipole number
+        Maximum multipole ell in the expansion.
     nthreads : int
-        number of OpenMP threads
+        Number of OpenMP threads for parallel computation.
+
+    Returns
+    -------
+    np.ndarray
+        Evaluated field values at the specified positions.
+        For spin > 0, returns array with shape ``(2, npoints)`` for the two
+        spin components.
     """
     if spin == 0:
         alm2 = alm.reshape((1, -1))
@@ -371,45 +332,38 @@ def get_val_nufft(alm, theta, phi, spin, lmax, nthreads):
 
 
 def check_theta_poles(coords):
-    """Routine for checking that the theta coordinate is in the range [0, pi].
-    We look for such extreme values only for the first and last rays, assuming
-    that these are HEALPix ring ordered. I.e. we check the 1% of the rays with 
-    most extreme latitudes.
+    """
+    Ensure theta coordinates remain within valid range [0, pi] near poles.
+
+    After ray deflection, some rays near the poles may have theta values
+    outside the valid range. This function corrects them by reflecting
+    across the poles and adjusting phi accordingly.
+
+    Only checks rays near the poles (0.5% at each end) assuming HEALPix
+    RING ordering where polar rays are at the start and end of the array.
 
     Parameters
     ----------
-    coords : 2D numpy array (shape: [2, nrays])
-        Spherical coordinates: theta and phi respectively in the first and second
-        column. One row for every ray
+    coords : np.ndarray
+        Ray coordinates with shape ``(2, nrays)``. First row is theta
+        (co-latitude), second row is phi (longitude). Modified in-place.
+
+    Notes
+    -----
+    Correction rules:
+
+    - If theta < 0: reflect to -theta, shift phi by pi
+    - If theta > pi: reflect to 2*pi - theta, shift phi by pi
     """
     n_check = int(0.005 * len(coords[:]))
-    # select both poles
     coords_pole_north = coords[:, :n_check]
     coords_pole_south = coords[:, -n_check:]
     for coords_pole in [coords_pole_north, coords_pole_south]:
-        # take care of negative theta
         idx = np.where(coords_pole[0] < 0)
         coords_pole[0, idx] = -coords_pole[0, idx]
-        # take care of theta that are greater than pi
         idx = np.where(coords_pole[0] > np.pi)
         coords_pole[0, idx] = 2 * np.pi - coords_pole[0, idx]
-        # make sure phi is not greater than 2*pi
         coords_pole[1, idx] += np.pi
         coords_pole[1, idx] %= 2 * np.pi
-    # reassign beta
     coords[:, :n_check] = coords_pole_north
     coords[:, -n_check:] = coords_pole_south
-
-
-def save_ray_positions_aux(
-    simDir, outDir, k_shell, params, beta_1, nside, interp, z_s
-):
-    """Auxiliary function to save ray positions"""
-    print("Saving ray positions...")
-    fname_out = f"{outDir}ray_position_shell{k_shell}_z{z_s:.1f}_{interp}.hdf5"
-    with h5py.File(fname_out, "a") as fout:
-        write_header(fout, simDir, params["BoxSize"], z_s, nside)
-        fout["Header"].attrs.create("shell_number", k_shell)
-        grp_beta = fout.create_group("Ray_position")
-        grp_beta.create_dataset("beta", data=beta_1)
-    print(f"Wrote ray positions to: {fname_out}")
