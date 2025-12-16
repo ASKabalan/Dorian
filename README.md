@@ -13,6 +13,9 @@
 ▐▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▌
 ```
 
+> This repo is a fork of https://gitlab.mpcdf.mpg.de/fferlito/dorian 
+> The goal of this repo is simplify the usage and make it usuable on raw lightcone arrays rather than read file from disk
+
 Deflection Of Rays In Astrophysical Numerical simulations
 
 Dorian is a Python package to compute full-sky ray-traced weak gravitational lensing maps starting from cosmological simulations.
@@ -23,7 +26,7 @@ For technical details, see the [related paper](https://arxiv.org/abs/2406.08540)
 
 The package can be installed with: 
 ```
-pip install dorian-astro
+pip install -e .
 ```
 
 You will need the following dependencies:
@@ -36,34 +39,39 @@ You will need the following dependencies:
 
 # Usage
 
-Using the code to perform a weak lensing simulation is as simple as calling the ```raytrace``` function. For instructions see the [example notebook](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/tutorial.ipynb) and the [template script](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/raytracing_example_script.py).
+This fork simplifies the workflow significantly. You can now pass density maps (as numpy arrays) directly to the raytracer without needing to format files on disk.
 
-The code needs you to point to the ```simDir``` folder, where all the mass shells are arranged in the Gadget-4 format (based on hdf5) and directory structure, e.g.:
+```python
+import numpy as np
+from dorian.lensing import raytrace_from_density
 
+# 1. Prepare your data
+# density_maps: shape (n_shells, npix)
+# redshifts: shape (n_shells,)
+# ...
+
+# 2. Run raytracing
+results = raytrace_from_density(
+    density_maps=density_maps,
+    redshifts=redshifts,
+    z_source=1.0,
+    box_size=2000.0,
+    n_particles=1024**3,
+    omega_m=0.3,
+    h=0.7,
+    omega_l=0.7,
+    nside=512,
+    interp='bilinear'
+)
+
+kappa_map = results['convergence_raytraced']
 ```
-simDir
- |-mapsdir_001
- | |-maps_001.0.hdf5
- | |-maps_001.1.hdf5
- | `-maps_001.2.hdf5
- |-mapsdir_002
- | |-maps_002.0.hdf5
- | |-maps_002.1.hdf5
- | `-maps_002.2.hdf5
- `-mapsdir_003
-   |-maps_003.0.hdf5
-   |-maps_003.1.hdf5
-   `-maps_003.2.hdf5
-```
 
-Where each ```mapsdir``` refers to a single mass-shell, and each mass-shell can be divided into multiple files (three in the example above). Note that the code supports mass-shells with variable thickness.
-
-If your mass-shells are in another format (e.g. HEALPix maps stored into numpy arrays), you can use the ```write_massmap``` function to convert each of them in the compatible format.
+For a complete working example, check `examples/raytracing_demo.ipynb`.
 
 # Examples
 
-- [Notebook: performing a weak lensing simulation and computing the convergence power spectrum](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/tutorial.ipynb).
-- [Script: performing a weak lensing simulation](https://gitlab.mpcdf.mpg.de/fferlito/dorian/-/blob/main/examples/raytracing_example_script.py).
+- [examples/raytracing_demo.ipynb](examples/raytracing_demo.ipynb): The recommended starting point. Demonstrates loading a sample lightcone and running the raytracer.
 
 # Authors
 
@@ -72,6 +80,8 @@ This package has been developed by [Fulvio Ferlito](https://gitlab.mpcdf.mpg.de/
 # Contact
 
 If you have any question, suggestion, or need help with the code, don't hesitate to contact the [author](mailto:fulvioferlito@gmail.com).
+
+If you have questions regarding  this fork please create a github issue
 
 # Citation
 
