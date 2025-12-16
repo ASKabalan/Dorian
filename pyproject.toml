@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dorian-raytrace"
+version = "0.1.0"
+description = "Deflection Of Rays In Astrophysical Numerical simulations - Full-sky ray-traced weak gravitational lensing maps from cosmological simulations"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "Fulvio Ferlito", email = "fulvioferlito@gmail.com"},
+]
+maintainers = [
+    {name = "Wassim Kabalan"}
+]
+keywords = ["cosmology", "weak-lensing", "ray-tracing", "gravitational-lensing", "astrophysics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "healpy",
+    "h5py",
+    "ducc0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/ASKabalan/dorian"
+"Original Source" = "https://gitlab.mpcdf.mpg.de/fferlito/dorian"
+"Bug Tracker" = "https://github.com/ASKabalan/dorian/issues"
+
+[tool.setuptools]
+packages = ["dorian"]
+
+[tool.setuptools.package-data]
+dorian = ["py.typed"]
