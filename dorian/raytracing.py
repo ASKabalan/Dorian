@@ -46,7 +46,7 @@ def raytrace(
     shell_redshifts : list of float
         Redshift of each shell, same length as ``shells``.
     shell_distances : list of float
-        Comoving distance to each shell in Mpc (not Mpc/h).
+        Comoving distance to each shell in Mpc/h.
     interp : {'bilinear', 'ngp', 'nufft'}, optional
         Interpolation method for sampling fields at ray positions:
 
@@ -138,12 +138,9 @@ def raytrace(
                 'index': i
             })
 
-    print(f"Using {len(contributing_shells)} shells out of {len(shells)} total")
 
     if len(contributing_shells) == 0:
         raise ValueError(f"No shells found with z < z_s ({z_s}). Check your shell redshifts.")
-
-    print(f"Shell redshift range: {contributing_shells[0]['redshift']:.3f} to {contributing_shells[-1]['redshift']:.3f}")
 
     npix = hp.nside2npix(nside)
 
@@ -180,8 +177,12 @@ def raytrace(
         kappa = kappa_fac * (1 + z_k) * (1 / d_k) * (Sigma - Sigma_mean)
 
         kappa_lm = hp.map2alm(kappa, pol=False, lmax=lmax)
-        alpha_lm = hp.almxfl(kappa_lm, -2 / (np.sqrt((ell * (ell + 1)))))
-        f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) / (ell * (ell + 1.0)))
+        alpha_factor = (np.sqrt((ell * (ell + 1)))) # Must safe divide
+        alpha_factor = np.where(alpha_factor == 0, 0, - 2 / alpha_factor) # Avoid division by zero at ell=0
+        alpha_lm = hp.almxfl(kappa_lm, alpha_factor)
+        fl_factor = (ell * (ell + 1.0))
+        fl_factor = np.where(fl_factor == 0, 0, 1 / fl_factor) # Avoid division by zero at ell=0
+        f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) * fl_factor) # Must safe divide
         g_lm_E = hp.almxfl(kappa_lm, f_l)
 
         if interp in ["ngp", "bilinear"]:
@@ -252,11 +253,7 @@ def raytrace(
             A[1, :, :, :] = rotate_tensor_array(A[1, :, :, :], cospsi, sinpsi)
 
         kappa_born += ((d_s - d_k) / d_s) * kappa
-
-    print(f"*"*73, flush=True)
-    print(f"Total time: {round(time.time()-t_begin)} s")
-    print("Ray tracing finished, bye.")
-    print(f"*"*73, flush=True)
+        
     return kappa_born, A[1], beta[1], theta
 
 

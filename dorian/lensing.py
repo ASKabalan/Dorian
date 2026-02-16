@@ -13,7 +13,7 @@ def prepare_density_shells(
     h=0.6766,
     omega_l=None,
     nside=None,
-    unit='number_density',
+    shell_widths=None,
 ):
     """
     Convert density planes to Dorian mass format for ray-tracing.
@@ -42,54 +42,44 @@ def prepare_density_shells(
         Dark energy density parameter (Omega_Lambda). Default: ``1 - omega_m``.
     nside : int, optional
         Target HEALPix NSIDE resolution. If None, auto-detected from first map.
-    unit : {'number_density', 'overdensity', 'mass'}, optional
-        Input unit type:
-
-        - ``'number_density'``: Particle count per pixel (default)
-        - ``'overdensity'``: delta = rho/rho_mean - 1
-        - ``'mass'``: Already in 10^10 M_sun/h per pixel
+    shell_widths : array-like, optional
+        Shell thickness d_R per shell in Mpc/h. Required when density_maps
+        contain number density (particles per (Mpc/h)^3). When provided, the
+        pixel volume is computed per shell to convert density to mass. When
+        None, density_maps are assumed to already contain particle counts per
+        pixel and are directly multiplied by the particle mass.
 
     Returns
     -------
     shells : list of np.ndarray
         Mass per pixel in units of 10^10 M_sun/h, ready for ray-tracing.
     shell_distances : list of float
-        Comoving distances to each shell in Mpc (not Mpc/h).
+        Comoving distances to each shell in Mpc/h.
     shell_redshifts : list of float
         Validated redshifts for each shell.
 
     Examples
     --------
-    Basic usage with particle counts:
+    Basic usage with number density maps and shell widths:
 
     >>> import numpy as np
     >>> from dorian.lensing import prepare_density_shells
     >>> # Create mock density maps (4 shells, nside=64)
     >>> nside = 64
     >>> npix = 12 * nside**2
-    >>> density_maps = [np.random.poisson(100, npix) for _ in range(4)]
+    >>> density_maps = [np.random.randn(npix) * 0.01 for _ in range(4)]
     >>> redshifts = [0.1, 0.2, 0.3, 0.4]
+    >>> shell_widths = [100.0, 100.0, 100.0, 100.0]  # Mpc/h
     >>> shells, distances, z_out = prepare_density_shells(
     ...     density_maps=density_maps,
     ...     redshifts=redshifts,
     ...     box_size=1000.0,        # Mpc/h
     ...     n_particles=256**3,
     ...     omega_m=0.3,
+    ...     shell_widths=shell_widths,
     ... )
     >>> len(shells)
     4
-
-    With overdensity input:
-
-    >>> delta_maps = [np.random.randn(npix) * 0.1 for _ in range(4)]
-    >>> shells, distances, z_out = prepare_density_shells(
-    ...     density_maps=delta_maps,
-    ...     redshifts=redshifts,
-    ...     box_size=1000.0,
-    ...     n_particles=256**3,
-    ...     omega_m=0.3,
-    ...     unit='overdensity',
-    ... )
 
     See Also
     --------
@@ -98,6 +88,8 @@ def prepare_density_shells(
     """
     if omega_l is None:
         omega_l = 1.0 - omega_m
+
+    assert shell_widths is not None, "shell_widths must be provided when density_maps contain number density"
 
     if isinstance(box_size, (int, float)):
         box_size = (box_size, box_size, box_size)
@@ -118,23 +110,19 @@ def prepare_density_shells(
     shell_distances = []
     shell_redshifts = []
 
-    for density_map, z in zip(density_maps, redshifts):
+    for i, (density_map, z) in enumerate(zip(density_maps, redshifts)):
         if hp.npix2nside(len(density_map)) != nside:
             density_map = hp.ud_grade(density_map, nside, power=-2)
 
         d_k = d_c(z=z, Omega_M=omega_m, Omega_L=omega_l)
 
-        if unit == 'number_density':
-            mass_per_pixel = density_map * particle_mass_dorian
-        elif unit == 'overdensity':
-            mean_density = n_particles / (box_size[0] * box_size[1] * box_size[2])
-            number_density = (1 + density_map) * mean_density
-            mass_per_pixel = number_density * particle_mass_dorian
-        elif unit == 'mass':
-            mass_per_pixel = density_map
-        else:
-            raise ValueError(f"Unknown unit type: {unit}. Must be 'number_density', 'overdensity', or 'mass'.")
-
+        dr = shell_widths[i]
+        R_min = max(d_k - dr / 2, 0.0)
+        R_max = d_k + dr / 2
+        shell_vol = (4.0 / 3.0) * np.pi * (R_max**3 - R_min**3)
+        pixel_vol = shell_vol / npix
+        mass_per_pixel = density_map * pixel_vol * particle_mass_dorian
+  
         shells.append(np.asarray(mass_per_pixel, dtype=np.float64))
         shell_distances.append(float(d_k))
         shell_redshifts.append(float(z))
@@ -153,7 +141,7 @@ def raytrace_from_density(
     omega_l=None,
     nside=None,
     interp='bilinear',
-    unit='number_density',
+    shell_widths=None,
     parallel_transport=True,
     lmax=0,
     nthreads=1,
@@ -194,13 +182,10 @@ def raytrace_from_density(
         - ``'ngp'``: Nearest grid point (fastest, lowest accuracy)
         - ``'nufft'``: Non-uniform FFT (highest accuracy, slowest)
 
-    unit : {'number_density', 'overdensity', 'mass'}, optional
-        Input unit type for density maps:
-
-        - ``'number_density'``: Particle count per pixel (default)
-        - ``'overdensity'``: delta = rho/rho_mean - 1
-        - ``'mass'``: Already in 10^10 M_sun/h per pixel
-
+    shell_widths : array-like, optional
+        Shell thickness d_R per shell in Mpc/h. Required when density_maps
+        contain number density (particles per (Mpc/h)^3). Passed through to
+        ``prepare_density_shells``.
     parallel_transport : bool, optional
         Whether to apply parallel transport of the distortion matrix along
         geodesics. Recommended to keep True for accurate results. Default: True.
@@ -297,7 +282,7 @@ def raytrace_from_density(
         h=h,
         omega_l=omega_l,
         nside=nside,
-        unit=unit,
+        shell_widths=shell_widths,
     )
 
     if nside is None:

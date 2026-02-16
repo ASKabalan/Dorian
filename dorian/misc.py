@@ -95,6 +95,16 @@ def fibonacci_sphere(n=1000, lonlat=True):
     return coords
 
 
+def run_once(f):
+    def wrapper(*args, **kwargs):
+        if not wrapper.has_run:
+            wrapper.has_run = True
+            return f(*args, **kwargs)
+        # Optional: return something else or raise an error if called again
+    wrapper.has_run = False
+    return wrapper
+
+@run_once
 def print_logo():
     logo = """
     ▐▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▌
