@@ -1,0 +1,9 @@
+# Python gitignore
+
+build
+dist 
+*.egg-info*
+.egg 
+*.pyc 
+__pycache__/ 
+.ipynb_checkpoints/
