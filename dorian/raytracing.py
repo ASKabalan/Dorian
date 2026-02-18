@@ -2,6 +2,7 @@ from .constants import M_sun_cgs, Mpc2cm, c_cgs, G_cgs
 from .cosmology import d_c
 from .parallel_transport import get_rotation_angle_array, rotate_tensor_array
 from .misc import print_logo
+from .logging import info, success, warning
 import numpy as np
 import healpy as hp
 from ducc0.sht import synthesis_general
@@ -138,9 +139,28 @@ def raytrace(
                 'index': i
             })
 
+    n_contrib = len(contributing_shells)
+    info(f"Ray-tracing: nside={nside}, z_source={z_s}, interp='{interp}', "
+         f"{n_contrib}/{len(shells)} shells contributing")
 
-    if len(contributing_shells) == 0:
-        raise ValueError(f"No shells found with z < z_s ({z_s}). Check your shell redshifts.")
+    if n_contrib == 0:
+        warning(f"No shells contribute (all z >= z_source={z_s})")
+        theta = np.array(hp.pix2ang(nside, np.arange(npix)))
+        nrays = theta.shape[1]
+        
+        # kappa_born is correctly zero (no matter, no convergence)
+        kappa_born = np.zeros(nrays)
+        
+        # beta (final positions) equals initial theta
+        beta_final = theta.copy()
+        
+        # A (distortion matrix) must be the IDENTITY matrix, not zeros
+        # A_final shape is (2, 2, npix)
+        A_final = np.zeros((2, 2, nrays))
+        A_final[0, 0, :] = 1.0
+        A_final[1, 1, :] = 1.0
+        
+        return kappa_born, A_final, beta_final, theta
 
     npix = hp.nside2npix(nside)
 
@@ -170,6 +190,7 @@ def raytrace(
         z_k = shell_info['redshift']
         d_k = shell_info['distance']
         shell_data = shell_info['shell_data']
+        info(f"Shell {k+1}/{n_contrib}: z={z_k:.4f}, d={d_k:.1f} Mpc/h")
 
         Sigma = shell_data / (4 * np.pi / npix)
         Sigma_mean = np.mean(Sigma)
@@ -178,11 +199,11 @@ def raytrace(
 
         kappa_lm = hp.map2alm(kappa, pol=False, lmax=lmax)
         alpha_factor = (np.sqrt((ell * (ell + 1)))) # Must safe divide
-        alpha_factor = np.where(alpha_factor == 0, 0, - 2 / alpha_factor) # Avoid division by zero at ell=0
-        alpha_lm = hp.almxfl(kappa_lm, alpha_factor)
+        alpha_factor = np.where(alpha_factor == 0, 1.0, alpha_factor) # Avoid division by zero at ell=0
+        alpha_lm = hp.almxfl(kappa_lm, -2 / alpha_factor)
         fl_factor = (ell * (ell + 1.0))
-        fl_factor = np.where(fl_factor == 0, 0, 1 / fl_factor) # Avoid division by zero at ell=0
-        f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) * fl_factor) # Must safe divide
+        fl_factor = np.where(fl_factor == 0, 1.0, fl_factor) # Avoid division by zero at ell=0
+        f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) / fl_factor) # Must safe divide
         g_lm_E = hp.almxfl(kappa_lm, f_l)
 
         if interp in ["ngp", "bilinear"]:
@@ -253,7 +274,13 @@ def raytrace(
             A[1, :, :, :] = rotate_tensor_array(A[1, :, :, :], cospsi, sinpsi)
 
         kappa_born += ((d_s - d_k) / d_s) * kappa
-        
+
+        t1 = time.time()
+        info(f"  Shell {k+1}/{n_contrib} done in {t1 - t0:.2f}s")
+
+    t_end = time.time()
+    success(f"Ray-tracing complete: {n_contrib} shells in {t_end - t_begin:.2f}s")
+
     return kappa_born, A[1], beta[1], theta
 
 

@@ -2,6 +2,7 @@ import numpy as np
 import healpy as hp
 from .cosmology import d_c
 from .raytracing import raytrace
+from .logging import info, success, warning
 
 
 def prepare_density_shells(
@@ -106,15 +107,21 @@ def prepare_density_shells(
     particle_mass_msun = (rho_matter * volume_box_mpc) / n_particles
     particle_mass_dorian = (particle_mass_msun * h) / 1e10
 
+    info(f"Preparing {len(density_maps)} density shells: nside={nside}, "
+         f"particle mass={particle_mass_dorian:.4e} [10^10 M_sun/h]")
+
     shells = []
     shell_distances = []
     shell_redshifts = []
 
     for i, (density_map, z) in enumerate(zip(density_maps, redshifts)):
-        if hp.npix2nside(len(density_map)) != nside:
+        map_nside = hp.npix2nside(len(density_map))
+        if map_nside != nside:
+            warning(f"Shell {i}: ud_grading nside {map_nside} -> {nside}")
             density_map = hp.ud_grade(density_map, nside, power=-2)
 
         d_k = d_c(z=z, Omega_M=omega_m, Omega_L=omega_l)
+        info(f"  Shell {i+1}/{len(density_maps)}: z={z:.4f}, d={d_k:.1f} Mpc/h")
 
         dr = shell_widths[i]
         R_min = max(d_k - dr / 2, 0.0)
@@ -126,6 +133,8 @@ def prepare_density_shells(
         shells.append(np.asarray(mass_per_pixel, dtype=np.float64))
         shell_distances.append(float(d_k))
         shell_redshifts.append(float(z))
+
+    success(f"Prepared {len(shells)} density shells")
 
     return shells, shell_distances, shell_redshifts
 
@@ -273,6 +282,9 @@ def raytrace_from_density(
     if omega_l is None:
         omega_l = 1.0 - omega_m
 
+    info(f"raytrace_from_density: z_source={z_source}, interp='{interp}', "
+         f"nside={nside if nside else 'auto'}")
+
     shells, distances, redshifts_clean = prepare_density_shells(
         density_maps=density_maps,
         redshifts=redshifts,
@@ -305,6 +317,8 @@ def raytrace_from_density(
     kappa_raytraced = 1.0 - 0.5 * (A_final[0, 0] + A_final[1, 1])
 
     n_used = sum(1 for z in redshifts_clean if z < z_source)
+
+    success(f"raytrace_from_density complete: {n_used}/{len(redshifts_clean)} shells used")
 
     return {
         'convergence_born': kappa_born,
