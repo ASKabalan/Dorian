@@ -124,9 +124,6 @@ def raytrace(
     dorian.lensing.prepare_density_shells : Convert density maps to mass format.
     """
     t_begin = time.time()
-
-    print_logo()
-
     kappa_fac = (1e10 * M_sun_cgs) * (1 / Mpc2cm) * 4 * np.pi * G_cgs / (c_cgs**2)
 
     contributing_shells = []
@@ -140,6 +137,7 @@ def raytrace(
             })
 
     n_contrib = len(contributing_shells)
+    npix = hp.nside2npix(nside)
     info(f"Ray-tracing: nside={nside}, z_source={z_s}, interp='{interp}', "
          f"{n_contrib}/{len(shells)} shells contributing")
 
@@ -147,22 +145,20 @@ def raytrace(
         warning(f"No shells contribute (all z >= z_source={z_s})")
         theta = np.array(hp.pix2ang(nside, np.arange(npix)))
         nrays = theta.shape[1]
-        
+
         # kappa_born is correctly zero (no matter, no convergence)
         kappa_born = np.zeros(nrays)
-        
+
         # beta (final positions) equals initial theta
         beta_final = theta.copy()
-        
+
         # A (distortion matrix) must be the IDENTITY matrix, not zeros
         # A_final shape is (2, 2, npix)
         A_final = np.zeros((2, 2, nrays))
         A_final[0, 0, :] = 1.0
         A_final[1, 1, :] = 1.0
-        
-        return kappa_born, A_final, beta_final, theta
 
-    npix = hp.nside2npix(nside)
+        return kappa_born, A_final, beta_final, theta
 
     d_s = d_c(z=z_s, Omega_M=omega_m, Omega_L=omega_l)
 
@@ -198,12 +194,12 @@ def raytrace(
         kappa = kappa_fac * (1 + z_k) * (1 / d_k) * (Sigma - Sigma_mean)
 
         kappa_lm = hp.map2alm(kappa, pol=False, lmax=lmax)
-        alpha_factor = (np.sqrt((ell * (ell + 1)))) # Must safe divide
+        alpha_factor = (np.sqrt((ell * (ell + 1)))) # Safe-divide: guarded below at ell=0
         alpha_factor = np.where(alpha_factor == 0, 1.0, alpha_factor) # Avoid division by zero at ell=0
         alpha_lm = hp.almxfl(kappa_lm, -2 / alpha_factor)
         fl_factor = (ell * (ell + 1.0))
         fl_factor = np.where(fl_factor == 0, 1.0, fl_factor) # Avoid division by zero at ell=0
-        f_l = -np.sqrt((ell + 2.0) * (ell - 1.0) / fl_factor) # Must safe divide
+        f_l = -np.sqrt(np.maximum(0.0, (ell + 2.0) * (ell - 1.0) / fl_factor)) # Must safe divide; clamp ell=0 (monopole tidal = 0)
         g_lm_E = hp.almxfl(kappa_lm, f_l)
 
         if interp in ["ngp", "bilinear"]:
