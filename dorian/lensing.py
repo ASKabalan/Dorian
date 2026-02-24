@@ -372,8 +372,17 @@ def raytrace_from_density(
     if omega_l is None:
         omega_l = 1.0 - omega_m
 
-    # Detect multi-source mode
-    is_multi = not isinstance(z_source, (int, float)) and hasattr(z_source, '__len__')
+    # Detect multi-source mode using robust scalar and sequence checks.
+    # - Scalars: np.isscalar(...) or 0-D numpy arrays -> single source.
+    # - Multi-source: explicit sequences (list/tuple) or numpy arrays with ndim > 0.
+    if np.isscalar(z_source) or (isinstance(z_source, np.ndarray) and z_source.ndim == 0):
+        is_multi = False
+    elif isinstance(z_source, (list, tuple, np.ndarray)):
+        # For numpy arrays, ndim > 0 is guaranteed here since 0-D case is handled above.
+        is_multi = True
+    else:
+        # Fallback: treat unknown types as single source to avoid misclassification.
+        is_multi = False
 
     info(f"raytrace_from_density: z_source={z_source}, interp='{interp}', "
          f"nside={nside if nside else 'auto'}, multi={is_multi}")
