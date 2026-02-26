@@ -7,6 +7,7 @@ import healpy as hp
 from .cosmology import d_c
 from .raytracing import raytrace
 from .logging import info, success, warning
+from math import prod
 
 def _raytrace_worker(args: tuple) -> dict:
     """Worker for parallel ray-tracing of a single source redshift.
@@ -161,7 +162,7 @@ def prepare_density_shells(
     rho_crit_h2 = 2.775e11
     rho_crit = rho_crit_h2 * h**2
     rho_matter = omega_m * rho_crit
-    volume_box_mpc = (box_size[0] / h)**3
+    volume_box_mpc = prod(box_size) / h**3
     particle_mass_msun = (rho_matter * volume_box_mpc) / n_particles
     particle_mass_dorian = (particle_mass_msun * h) / 1e10
 
