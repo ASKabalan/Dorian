@@ -406,7 +406,7 @@ def raytrace_from_density(
     if is_multi:
         z_sources = list(z_source)
         if n_workers is None:
-            n_workers = len(z_sources)
+            n_workers = min(len(z_sources), multiprocessing.cpu_count())
 
         # Stack shells into one contiguous 2-D array for shared memory.
         shells_2d = np.array(shells)          # shape: (n_shells, npix), float64
