@@ -1,7 +1,3 @@
-import concurrent.futures
-import multiprocessing
-from multiprocessing import shared_memory
-
 import numpy as np
 import healpy as hp
 from .cosmology import d_c
@@ -9,44 +5,24 @@ from .raytracing import raytrace
 from .logging import info, success, warning
 from math import prod
 
-def _raytrace_worker(args: tuple) -> dict:
-    """Worker for parallel ray-tracing of a single source redshift.
 
-    Receives a lightweight tuple ``(z_s, shm_name, shm_shape, shm_dtype,
-    distances, redshifts_clean, omega_m, omega_l, nside, interp, lmax,
-    parallel_transport, nufft_nthreads)``.
-
-    The large ``shells`` array is read from a named shared-memory block
-    (zero-copy; no pickling of the pixel data).
-    """
-    (z_s, shm_name, shm_shape, shm_dtype,
-     distances, redshifts_clean,
-     omega_m, omega_l, nside, interp, lmax,
-     parallel_transport, nufft_nthreads) = args
-
-    import dorian.logging as _dlog
-    _dlog._prefix = f"[z_s={z_s:.2f}] "
-
-    existing_shm = shared_memory.SharedMemory(name=shm_name)
-    try:
-        shells_2d = np.ndarray(shm_shape, dtype=shm_dtype, buffer=existing_shm.buf)
-        shells = list(shells_2d)   # list of 1-D views — exactly what raytrace() expects
-        kappa_born, A_final, beta_final, theta = raytrace(
-            shells=shells,
-            z_s=z_s,
-            omega_m=omega_m,
-            omega_l=omega_l,
-            nside=nside,
-            shell_redshifts=redshifts_clean,
-            shell_distances=distances,
-            interp=interp,
-            lmax=lmax,
-            parallel_transport=parallel_transport,
-            nthreads=nufft_nthreads,
-        )
-    finally:
-        existing_shm.close()
-
+def _single_raytrace(shells, z_s, omega_m, omega_l, nside,
+                     redshifts_clean, distances,
+                     interp, lmax, parallel_transport, nufft_nthreads):
+    """Run ray-tracing for a single source redshift and return a result dict."""
+    kappa_born, A_final, beta_final, theta = raytrace(
+        shells=shells,
+        z_s=z_s,
+        omega_m=omega_m,
+        omega_l=omega_l,
+        nside=nside,
+        shell_redshifts=redshifts_clean,
+        shell_distances=distances,
+        interp=interp,
+        lmax=lmax,
+        parallel_transport=parallel_transport,
+        nthreads=nufft_nthreads,
+    )
     kappa_raytraced = 1.0 - 0.5 * (A_final[0, 0] + A_final[1, 1])
     n_used = sum(1 for z in redshifts_clean if z < z_s)
     return {
@@ -61,6 +37,18 @@ def _raytrace_worker(args: tuple) -> dict:
             'n_shells_total': len(redshifts_clean),
             'n_shells_used': n_used,
         },
+    }
+
+
+def _stack_results(results):
+    """Stack a list of single-source result dicts into arrays with a leading n_sources axis."""
+    return {
+        'convergence_born':      np.stack([r['convergence_born']      for r in results]),
+        'convergence_raytraced': np.stack([r['convergence_raytraced'] for r in results]),
+        'distortion_matrix':     np.stack([r['distortion_matrix']     for r in results]),
+        'ray_positions':         np.stack([r['ray_positions']         for r in results]),
+        'initial_positions':     np.stack([r['initial_positions']     for r in results]),
+        'shell_info':            [r['shell_info'] for r in results],
     }
 
 
@@ -188,7 +176,7 @@ def prepare_density_shells(
         shell_vol = (4.0 / 3.0) * np.pi * (R_max**3 - R_min**3)
         pixel_vol = shell_vol / npix
         mass_per_pixel = density_map * pixel_vol * particle_mass_dorian
-  
+
         shells.append(np.asarray(mass_per_pixel, dtype=np.float64))
         shell_distances.append(float(d_k))
         shell_redshifts.append(float(z))
@@ -213,7 +201,7 @@ def raytrace_from_density(
     parallel_transport=True,
     lmax=0,
     nufft_nthreads=1,
-    n_workers=None,
+    comm=None,
 ):
     """
     Perform full-sky weak lensing ray-tracing from density maps.
@@ -232,10 +220,9 @@ def raytrace_from_density(
         Only shells with ``z < z_source`` will be used.
     z_source : float or list of float
         Source redshift(s). When a scalar, traces rays for a single source and
-        returns a single dict. When a list, calls ``prepare_density_shells``
-        exactly once and runs each source in parallel via
-        ``ProcessPoolExecutor``, returning a merged dict with stacked arrays of
-        shape ``(n_sources, ...)``.
+        returns a single dict. When a list, runs each source sequentially (or
+        distributed across MPI ranks when ``comm`` is provided), returning a
+        merged dict with stacked arrays of shape ``(n_sources, ...)``.
     box_size : float or tuple of float
         Simulation box size in Mpc/h. If a single value, assumes cubic box.
     n_particles : int
@@ -267,17 +254,21 @@ def raytrace_from_density(
         Default: ``3 * nside`` (sufficient for most applications).
     nufft_nthreads : int, optional
         Number of OpenMP threads for ``'nufft'`` interpolation. Default: 1.
-    n_workers : int or None, optional
-        Number of worker processes for parallel multi-source execution.
-        Only used when ``z_source`` is a list. Defaults to ``len(z_source)``
-        (one worker per source).
+    comm : mpi4py.MPI.Comm or None, optional
+        An MPI communicator (e.g. ``MPI.COMM_WORLD``). When provided, sources
+        are distributed across ranks via round-robin assignment: rank *i*
+        handles source indices *i*, *i+size*, *i+2×size*, …. Non-root ranks
+        return ``None``; rank 0 returns the full stacked result. When ``None``
+        (default), all sources are processed sequentially in the calling
+        process.
 
     Returns
     -------
-    results : dict
-        Dictionary containing all ray-tracing outputs.
+    results : dict or None
+        Dictionary containing all ray-tracing outputs. Non-root MPI ranks
+        return ``None``.
 
-        **Scalar z_source** (existing behaviour):
+        **Scalar z_source** (single-source):
 
         - ``'convergence_born'`` : np.ndarray, shape ``(npix,)``
         - ``'convergence_raytraced'`` : np.ndarray, shape ``(npix,)``
@@ -287,7 +278,7 @@ def raytrace_from_density(
         - ``'shell_info'`` : dict with keys ``'redshifts'``, ``'distances'``,
           ``'n_shells_total'``, ``'n_shells_used'``.
 
-        **List z_source** (multi-source parallel path):
+        **List z_source** (multi-source path):
 
         - ``'convergence_born'`` : np.ndarray, shape ``(n_sources, npix)``
         - ``'convergence_raytraced'`` : np.ndarray, shape ``(n_sources, npix)``
@@ -336,19 +327,21 @@ def raytrace_from_density(
     ...     nufft_nthreads=8,
     ... )
 
-    Multi-source parallel ray-tracing (outputs have an extra leading axis):
+    Multi-source MPI ray-tracing (outputs have an extra leading axis):
 
+    >>> from mpi4py import MPI
     >>> z_sources = [0.5, 1.0, 2.0]
     >>> results = raytrace_from_density(
     ...     density_maps=density_maps,
     ...     redshifts=redshifts,
-    ...     z_source=z_sources,   # list → parallel execution
+    ...     z_source=z_sources,
     ...     box_size=2000.0,
     ...     n_particles=512**3,
     ...     omega_m=0.3,
     ...     nside=512,
-    ...     n_workers=3,          # one process per source
+    ...     comm=MPI.COMM_WORLD,   # distribute across MPI ranks
     ... )
+    >>> # On rank 0:
     >>> results['convergence_born'].shape   # (3, npix)
     (3, 3145728)
     >>> results['distortion_matrix'].shape  # (3, 2, 2, npix)
@@ -403,72 +396,58 @@ def raytrace_from_density(
     if nside is None:
         nside = hp.npix2nside(len(shells[0]))
 
-    if is_multi:
-        z_sources = list(z_source)
-        if n_workers is None:
-            n_workers = min(len(z_sources), multiprocessing.cpu_count())
+    # Normalize z_source to list internally
+    z_sources = list(z_source) if is_multi else [float(z_source)]
 
-        # Stack shells into one contiguous 2-D array for shared memory.
-        shells_2d = np.array(shells)          # shape: (n_shells, npix), float64
-        shm = shared_memory.SharedMemory(create=True, size=shells_2d.nbytes)
-        try:
-            # Copy into the shared block (write once in parent).
-            shm_array = np.ndarray(shells_2d.shape, dtype=shells_2d.dtype, buffer=shm.buf)
-            shm_array[:] = shells_2d
+    if comm is not None:
+        # ── MPI path ──────────────────────────────────────────────────────────
+        rank = comm.Get_rank()
+        size = comm.Get_size()
 
-            worker_args = [
-                (float(z_s), shm.name, shells_2d.shape, shells_2d.dtype.str,
-                 distances, redshifts_clean,
-                 omega_m, omega_l, nside, interp, lmax, parallel_transport, nufft_nthreads)
-                for z_s in z_sources
-            ]
-            with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-                results = list(executor.map(_raytrace_worker, worker_args))
-        finally:
-            shm.close()
-            shm.unlink()
+        import dorian.logging as _dlog
+        _dlog._prefix = f"[rank {rank}] "
 
-        success(f"raytrace_from_density complete: {len(z_sources)} sources processed in parallel")
+        # Round-robin: rank i handles indices i, i+size, i+2*size, ...
+        my_indices = list(range(rank, len(z_sources), size))
+        my_results = []
+        for idx in my_indices:
+            z = z_sources[idx]
+            info(f"Processing z_source={z:.4f}")
+            result = _single_raytrace(shells, z, omega_m, omega_l, nside,
+                                      redshifts_clean, distances,
+                                      interp, lmax, parallel_transport, nufft_nthreads)
+            my_results.append((idx, result))
 
-        return {
-            'convergence_born':      np.stack([r['convergence_born']      for r in results]),  # (n_sources, npix)
-            'convergence_raytraced': np.stack([r['convergence_raytraced'] for r in results]),  # (n_sources, npix)
-            'distortion_matrix':     np.stack([r['distortion_matrix']     for r in results]),  # (n_sources, 2, 2, npix)
-            'ray_positions':         np.stack([r['ray_positions']         for r in results]),  # (n_sources, 2, npix)
-            'initial_positions':     np.stack([r['initial_positions']     for r in results]),  # (n_sources, 2, npix)
-            'shell_info':            [r['shell_info'] for r in results],                       # list[dict]
-        }
+        # Gather all (index, result) pairs to rank 0
+        gathered = comm.gather(my_results, root=0)
+
+        if rank == 0:
+            # Flatten and sort by original z_source order
+            flat = sorted(
+                [pair for rank_list in gathered for pair in rank_list],
+                key=lambda x: x[0],
+            )
+            ordered_results = [r for _, r in flat]
+
+            success(f"raytrace_from_density complete: {len(z_sources)} sources across {size} ranks")
+
+            if not is_multi:
+                return ordered_results[0]
+            return _stack_results(ordered_results)
+        else:
+            return None  # non-root ranks return None
+
     else:
-        kappa_born, A_final, beta_final, theta = raytrace(
-            shells=shells,
-            z_s=z_source,
-            omega_m=omega_m,
-            omega_l=omega_l,
-            nside=nside,
-            shell_redshifts=redshifts_clean,
-            shell_distances=distances,
-            interp=interp,
-            lmax=lmax,
-            parallel_transport=parallel_transport,
-            nthreads=nufft_nthreads,
-        )
+        # ── Sequential path (no MPI) ──────────────────────────────────────────
+        ordered_results = []
+        for z in z_sources:
+            ordered_results.append(
+                _single_raytrace(shells, z, omega_m, omega_l, nside,
+                                 redshifts_clean, distances,
+                                 interp, lmax, parallel_transport, nufft_nthreads)
+            )
+        success(f"raytrace_from_density complete: {len(z_sources)} sources (sequential)")
 
-        kappa_raytraced = 1.0 - 0.5 * (A_final[0, 0] + A_final[1, 1])
-
-        n_used = sum(1 for z in redshifts_clean if z < z_source)
-
-        success(f"raytrace_from_density complete: {n_used}/{len(redshifts_clean)} shells used")
-
-        return {
-            'convergence_born': kappa_born,
-            'convergence_raytraced': kappa_raytraced,
-            'distortion_matrix': A_final,
-            'ray_positions': beta_final,
-            'initial_positions': theta,
-            'shell_info': {
-                'redshifts': redshifts_clean,
-                'distances': distances,
-                'n_shells_total': len(redshifts_clean),
-                'n_shells_used': n_used,
-            },
-        }
+        if not is_multi:
+            return ordered_results[0]
+        return _stack_results(ordered_results)
