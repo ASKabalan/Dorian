@@ -381,17 +381,36 @@ def raytrace_from_density(
     info(f"raytrace_from_density: z_source={z_source}, interp='{interp}', "
          f"nside={nside if nside else 'auto'}, multi={is_multi}")
 
-    shells, distances, redshifts_clean = prepare_density_shells(
-        density_maps=density_maps,
-        redshifts=redshifts,
-        box_size=box_size,
-        n_particles=n_particles,
-        omega_m=omega_m,
-        h=h,
-        omega_l=omega_l,
-        nside=nside,
-        shell_widths=shell_widths,
-    )
+    # ── Prepare Density Shells (rank 0 only, then broadcast) ───────────────
+    if comm is not None:
+        rank = comm.Get_rank()
+        if rank == 0:
+            prepared_data = prepare_density_shells(
+                density_maps=density_maps,
+                redshifts=redshifts,
+                box_size=box_size,
+                n_particles=n_particles,
+                omega_m=omega_m,
+                h=h,
+                omega_l=omega_l,
+                nside=nside,
+                shell_widths=shell_widths,
+            )
+        else:
+            prepared_data = None
+        shells, distances, redshifts_clean = comm.bcast(prepared_data, root=0)
+    else:
+        shells, distances, redshifts_clean = prepare_density_shells(
+            density_maps=density_maps,
+            redshifts=redshifts,
+            box_size=box_size,
+            n_particles=n_particles,
+            omega_m=omega_m,
+            h=h,
+            omega_l=omega_l,
+            nside=nside,
+            shell_widths=shell_widths,
+        )
 
     if nside is None:
         nside = hp.npix2nside(len(shells[0]))
@@ -420,6 +439,8 @@ def raytrace_from_density(
 
         # Gather all (index, result) pairs to rank 0
         gathered = comm.gather(my_results, root=0)
+        # barrier
+        comm.Barrier()
 
         if rank == 0:
             # Flatten and sort by original z_source order
