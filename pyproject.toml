@@ -3,17 +3,18 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dorian-raytrace"
-version = "0.1.0"
+name = "dorian-raytrace-mpi"
+version = "0.2.0"
 description = "Deflection Of Rays In Astrophysical Numerical simulations - Full-sky ray-traced weak gravitational lensing maps from cosmological simulations"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "GPL-3.0"}
 authors = [
     {name = "Fulvio Ferlito", email = "fulvioferlito@gmail.com"},
+    {name = "Wassim Kabalan", email = "wassim@apc.in2p3.fr"},
 ]
 maintainers = [
-    {name = "Wassim Kabalan"}
+    {name = "Wassim Kabalan", email = "wassim@apc.in2p3.fr"}
 ]
 keywords = ["cosmology", "weak-lensing", "ray-tracing", "gravitational-lensing", "astrophysics"]
 classifiers = [
@@ -35,6 +36,7 @@ dependencies = [
     "healpy",
     "h5py",
     "ducc0",
+    "mpi4py",
 ]
 
 [project.urls]
