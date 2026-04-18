@@ -62,6 +62,7 @@ def prepare_density_shells(
     omega_l=None,
     nside=None,
     shell_widths=None,
+    normalization="global",
 ):
     """
     Convert density planes to Dorian mass format for ray-tracing.
@@ -154,6 +155,8 @@ def prepare_density_shells(
     particle_mass_msun = (rho_matter * volume_box_mpc) / n_particles
     particle_mass_dorian = (particle_mass_msun * h) / 1e10
 
+    rho_cosmic = n_particles / prod(box_size)
+
     info(f"Preparing {len(density_maps)} density shells: nside={nside}, "
          f"particle mass={particle_mass_dorian:.4e} [10^10 M_sun/h]")
 
@@ -171,11 +174,15 @@ def prepare_density_shells(
         info(f"  Shell {i+1}/{len(density_maps)}: z={z:.4f}, d={d_k:.1f} Mpc/h")
 
         dr = shell_widths[i]
-        R_min = max(d_k - dr / 2, 0.0)
-        R_max = d_k + dr / 2
-        shell_vol = (4.0 / 3.0) * np.pi * (R_max**3 - R_min**3)
+        shell_vol = 4.0 * np.pi * d_k**2 * dr
         pixel_vol = shell_vol / npix
-        mass_per_pixel = density_map * pixel_vol * particle_mass_dorian
+
+        if normalization == "per_plane":
+            rho_mean_shell = np.mean(density_map)
+            correction = rho_cosmic / rho_mean_shell if rho_mean_shell > 0 else 1.0
+        else:  # "global"
+            correction = 1.0
+        mass_per_pixel = density_map * pixel_vol * particle_mass_dorian * correction
 
         shells.append(np.asarray(mass_per_pixel, dtype=np.float64))
         shell_distances.append(float(d_k))
@@ -202,6 +209,7 @@ def raytrace_from_density(
     lmax=0,
     nufft_nthreads=1,
     comm=None,
+    normalization="global",
 ):
     """
     Perform full-sky weak lensing ray-tracing from density maps.
@@ -385,7 +393,7 @@ def raytrace_from_density(
     if comm is not None:
         rank = comm.Get_rank()
         if rank == 0:
-            prepared_data = prepare_density_shells(
+            shells, distances, redshifts_clean = prepare_density_shells(
                 density_maps=density_maps,
                 redshifts=redshifts,
                 box_size=box_size,
@@ -395,10 +403,34 @@ def raytrace_from_density(
                 omega_l=omega_l,
                 nside=nside,
                 shell_widths=shell_widths,
+                normalization=normalization,
             )
+            meta = {
+                'distances': distances,
+                'redshifts_clean': redshifts_clean,
+                'n_shells': len(shells),
+                'shape': shells[0].shape,
+                'dtype': shells[0].dtype,
+            }
         else:
-            prepared_data = None
-        shells, distances, redshifts_clean = comm.bcast(prepared_data, root=0)
+            meta = None
+
+        # Step 1: broadcast tiny metadata dict (always < 2 GB)
+        meta = comm.bcast(meta, root=0)
+
+        # Step 2: broadcast each shell array via buffer-protocol Bcast
+        # (no pickle, no 2 GB limit)
+        if rank != 0:
+            shells = [
+                np.empty(meta['shape'], dtype=meta['dtype'])
+                for _ in range(meta['n_shells'])
+            ]
+            distances = meta['distances']
+            redshifts_clean = meta['redshifts_clean']
+
+        for shell in shells:
+            comm.Bcast(shell, root=0)
+
     else:
         shells, distances, redshifts_clean = prepare_density_shells(
             density_maps=density_maps,
@@ -410,6 +442,7 @@ def raytrace_from_density(
             omega_l=omega_l,
             nside=nside,
             shell_widths=shell_widths,
+            normalization=normalization,
         )
 
     if nside is None:
